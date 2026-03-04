@@ -6,11 +6,11 @@ from transformers import AutoTokenizer, AutoModel
 # -------------------------
 # Load simplified data
 # -------------------------
-df = pd.read_excel("OriginalDataSimplified.xlsx", engine="openpyxl")
+df = pd.read_excel("OriginalData2.xlsx", engine="openpyxl")
 print("Columns found:", list(df.columns))
 
 # Fix European decimals (e.g., "8,9")
-df["HIC"] = df["HIC"].astype(str).str.replace(",", ".").astype(float)
+df["HIC retention time (min)"] = df["HIC retention time (min)"].astype(str).str.replace(",", ".").astype(float)
 
 # Clean sequences (remove spaces/hyphens just in case)
 df["VH_clean"] = df["VH Protein"].str.replace(" ", "").str.replace("-", "")
@@ -19,7 +19,7 @@ df["VL_clean"] = df["VL Protein"].str.replace(" ", "").str.replace("-", "")
 # -------------------------
 # Load ESM-2 (650M model)
 # -------------------------
-model_name = "facebook/esm2_t33_650M_UR50D"
+model_name = "facebook/esm2_t30_150M_UR50D"     # Later: "facebook/esm2_t33_650M_UR50D" or keep 150M if performance is similar
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModel.from_pretrained(model_name)
 model.eval()
@@ -64,8 +64,8 @@ print("VH embedding shape:", vh_embeddings.shape)
 print("VL embedding shape:", vl_embeddings.shape)
 
 # Save if you want
-torch.save(vh_embeddings, "VH_embeddings.pt")
-torch.save(vl_embeddings, "VL_embeddings.pt")
+#torch.save(vh_embeddings, "VH_embeddings.pt")
+#torch.save(vl_embeddings, "VL_embeddings.pt")
 
 # Combine VH and VL embeddings
 features = np.concatenate([
@@ -75,3 +75,103 @@ features = np.concatenate([
 
 # Save
 np.save("combined_features.npy", features)
+
+# Labels (HIC minutes)
+y = df["HIC retention time (min)"].values.astype(float)
+
+# Features are already in 'features' (shape = [N, 2560]) from your code above.
+X = features
+print("X shape:", X.shape, "y shape:", y.shape)
+
+# =========================
+# Save features + labels
+# =========================
+
+# 1) Save feature matrix
+np.save("combined_features.npy", features)
+print("Saved → combined_features.npy", features.shape)
+
+# 2) Build labels.csv aligned to X rows
+labels_df = pd.DataFrame({
+    "hic_min": df["HIC retention time (min)"].values.astype(float)
+})
+if "Clone name" in df.columns:
+    labels_df["Clone name"] = df["Clone name"].values
+labels_df.to_csv("labels.csv", index=False)
+print("Saved → labels.csv", labels_df.shape)
+
+print(f"\nDataset ready → X: {X.shape}, y: {y.shape}\n")
+
+
+# =========================
+# Ridge Regression (CV baseline) with tidy output
+# =========================
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import train_test_split, RepeatedKFold, GridSearchCV
+from sklearn.metrics import mean_absolute_error, r2_score
+
+# (Optional) Spearman correlation
+try:
+    from scipy.stats import spearmanr
+    HAS_SPEARMAN = True
+except Exception:
+    HAS_SPEARMAN = False
+
+# 1) Train/test split
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# 2) Pipeline: Standardize → Ridge
+pipe = Pipeline([
+    ("scaler", StandardScaler(with_mean=True, with_std=True)),
+    ("ridge", Ridge(random_state=42))
+])
+
+# 3) Hyperparameter grid + robust CV
+alphas = np.logspace(-3, 3, 13)   # 1e-3 … 1e3
+param_grid = {"ridge__alpha": alphas}
+cv = RepeatedKFold(n_splits=5, n_repeats=3, random_state=42)
+
+gs = GridSearchCV(
+    estimator=pipe,
+    param_grid=param_grid,
+    cv=cv,
+    scoring="neg_mean_absolute_error",  # optimize MAE in CV
+    n_jobs=-1,
+    refit=True
+)
+gs.fit(X_tr, y_tr)
+
+# 4) Evaluate on held-out test
+y_pred = gs.predict(X_te)
+mae  = mean_absolute_error(y_te, y_pred)
+r2   = r2_score(y_te, y_pred)
+if HAS_SPEARMAN:
+    rho, rho_p = spearmanr(y_te, y_pred)
+else:
+    rho, rho_p = (None, None)
+
+# 5) Tidy printout
+print("=== Ridge Regression (CV Baseline) ===")
+print(f"Samples: train={len(y_tr)}, test={len(y_te)}, features={X.shape[1]}")
+print(f"Best alpha (CV): {gs.best_params_['ridge__alpha']:.6g}")
+print(f"CV best score (−MAE): {-gs.best_score_:.4f}  "
+      f"(lower is better, RepeatedKFold)")
+print("\n-- Held-out Test Metrics --")
+print(f"MAE (min): {mae:.4f}")
+print(f"R^2:       {r2:.4f}")
+if HAS_SPEARMAN:
+    print(f"Spearman ρ: {rho:.4f}  (p={rho_p:.3g})")
+else:
+    print("Spearman ρ: (scipy not installed)")
+
+# 6) Save the fitted model (optional)
+try:
+    import joblib
+    joblib.dump(gs.best_estimator_, "ridge_hic_model.joblib")
+    print("\nSaved → ridge_hic_model.joblib")
+except Exception:
+    print("\nModel not saved (install 'joblib' to enable saving).")
