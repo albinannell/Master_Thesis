@@ -6,15 +6,45 @@ from transformers import AutoTokenizer, AutoModel
 # -------------------------
 # Load simplified data
 # -------------------------
-df = pd.read_excel("OriginalData2.xlsx", engine="openpyxl")
+df = pd.read_excel("OriginalData.xlsx", engine="openpyxl")
 print("Columns found:", list(df.columns))
 
-# Fix European decimals (e.g., "8,9")
-df["HIC retention time (min)"] = df["HIC retention time (min)"].astype(str).str.replace(",", ".").astype(float)
+# --- Clean HIC robustly (coerce errors to NaN) ---
+hic_raw = (
+    df["HIC retention time (min)"]
+      .astype(str)
+      .str.replace(",", ".", regex=False)
+      .str.strip()
+)
 
-# Clean sequences (remove spaces/hyphens just in case)
-df["VH_clean"] = df["VH Protein"].str.replace(" ", "").str.replace("-", "")
-df["VL_clean"] = df["VL Protein"].str.replace(" ", "").str.replace("-", "")
+# Convert to numeric; invalid strings -> NaN
+hic_num = pd.to_numeric(hic_raw, errors="coerce")
+
+# Build a keep mask: valid HIC and non-empty VH/VL
+vh_clean = df["VH Protein"].astype(str).str.replace(" ", "").str.replace("-", "")
+vl_clean = df["VL Protein"].astype(str).str.replace(" ", "").str.replace("-", "")
+
+keep_mask = (~hic_num.isna()) & (vh_clean.str.len() > 0) & (vl_clean.str.len() > 0)
+
+dropped = (~keep_mask).sum()
+if dropped > 0:
+    print(f"Filtering: dropping {dropped} row(s) with non-numeric HIC or empty VH/VL.")
+
+# Filter the dataframe & assign cleaned columns
+df = df.loc[keep_mask].copy()
+df["HIC retention time (min)"] = hic_num.loc[keep_mask].astype(float)
+df["VH_clean"] = vh_clean.loc[keep_mask]
+df["VL_clean"] = vl_clean.loc[keep_mask]
+
+# Optional - For auditability in your thesis, you can save which rows were removed
+dropped_rows = ~keep_mask
+if dropped_rows.any():
+    cols_to_show = ["Clone name", "HIC retention time (min)", "VH Protein", "VL Protein"]
+    df_original = pd.read_excel("OriginalData.xlsx", engine="openpyxl")
+    pd.DataFrame(df_original.loc[dropped_rows, cols_to_show]).to_csv(
+        "dropped_rows_due_to_bad_HIC_or_sequence.csv", index=False
+    )
+    print("Saved dropped row details → dropped_rows_due_to_bad_HIC_or_sequence.csv")
 
 # -------------------------
 # Load ESM-2 (650M model)
