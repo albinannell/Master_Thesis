@@ -2,6 +2,10 @@ import pandas as pd
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
+import random
+SEED = 42
+np.random.seed(SEED); random.seed(SEED); torch.manual_seed(SEED)
+
 
 # -------------------------
 # Load simplified data
@@ -86,8 +90,8 @@ for _, row in df.iterrows():
     vl_embeddings.append(embed_seq(row["VL_clean"]))
 
 
-vh_embeddings = torch.from_numpy(np.stack(vh_embeddings, axis=0))  # (N, 1280)
-vl_embeddings = torch.from_numpy(np.stack(vl_embeddings, axis=0))  # (N, 1280)
+vh_embeddings = torch.from_numpy(np.stack(vh_embeddings, axis=0))  # (N, 640)
+vl_embeddings = torch.from_numpy(np.stack(vl_embeddings, axis=0))  # (N, 640)
 
 
 print("VH embedding shape:", vh_embeddings.shape)
@@ -103,8 +107,6 @@ features = np.concatenate([
     vl_embeddings.numpy()
 ], axis=1)
 
-# Save
-np.save("combined_features.npy", features)
 
 # Labels (HIC minutes)
 y = df["HIC retention time (min)"].values.astype(float)
@@ -132,6 +134,8 @@ print("Saved → labels.csv", labels_df.shape)
 
 print(f"\nDataset ready → X: {X.shape}, y: {y.shape}\n")
 
+
+# (From here on, I can re‑run the ML part without recomputing embeddings.)
 
 # =========================
 # Ridge Regression (CV baseline) with tidy output
